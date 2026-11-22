@@ -16,17 +16,26 @@ android {
   compileSdk = 36
 
   defaultConfig {
-    applicationId = "com.keonyrus.tupovision"
+    applicationId = "com.senovali.tupovision"
     minSdk = 31
     targetSdk = 36
     versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-    versionName = "0.1." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+    versionName = "0.2." + (System.getenv("GITHUB_RUN_NUMBER") ?: "0")
+    testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
     // Meta Wearables Device Access Toolkit. With Developer Mode switched on in the Meta AI app the
     // SDK skips attestation, so both values stay "0". A published build needs the real values from
     // the Wearables Developer Center.
     manifestPlaceholders["mwdat_application_id"] = "0"
     manifestPlaceholders["mwdat_client_token"] = "0"
+  }
+
+  buildFeatures { buildConfig = true }
+
+  testOptions {
+    unitTests.isReturnDefaultValues = true
+    unitTests.isIncludeAndroidResources = true
+    unitTests.all { it.jvmArgs("-Duser.language=en", "-Duser.country=US") }
   }
 
   signingConfigs {
@@ -71,4 +80,27 @@ dependencies {
   implementation(libs.okhttp)
   implementation(libs.mwdat.core)
   implementation(libs.mwdat.camera)
+  implementation(libs.mwdat.inputs)
+  implementation(libs.mlkit.text.recognition)
+  implementation(libs.mlkit.barcode.scanning)
+  debugImplementation(libs.mwdat.mockdevice)
+  debugImplementation(libs.androidx.compose.ui.test.manifest)
+  testImplementation(platform(libs.androidx.compose.bom))
+  testImplementation(libs.junit)
+  testImplementation(libs.json)
+  testImplementation(libs.okhttp.mockwebserver)
+  testImplementation(libs.kotlinx.coroutines.test)
+  testImplementation(libs.robolectric)
+  testImplementation(libs.androidx.test.core)
+  testImplementation(libs.androidx.test.ext.junit)
+  testImplementation(libs.androidx.compose.ui.test.junit4)
+  androidTestImplementation(platform(libs.androidx.compose.bom))
+  androidTestImplementation(libs.androidx.test.core)
+  androidTestImplementation(libs.androidx.test.ext.junit)
+  androidTestImplementation(libs.androidx.test.runner)
+  androidTestImplementation(libs.androidx.espresso.core)
+  androidTestImplementation(libs.androidx.espresso.accessibility) {
+    exclude(group = "com.google.protobuf", module = "protobuf-lite")
+  }
+  androidTestImplementation(libs.androidx.compose.ui.test.junit4)
 }

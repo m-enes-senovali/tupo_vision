@@ -9,10 +9,12 @@ import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
+import android.os.SystemClock
 import android.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -34,16 +36,23 @@ import org.json.JSONObject
  */
 class GeminiLive(
     private val apiKey: String,
+    private val model: String = DEFAULT_MODEL,
     private val instructions: String,
     private val resumeHandle: String?,
     /** False sends only the fields every Live model accepts, as a fallback when setup is refused. */
     private val fullSetup: Boolean,
+    private val enableGoogleSearch: Boolean = true,
+    private val enableFunctionTools: Boolean = true,
     /** When false the microphone is silenced while the model speaks, for setups with echo. */
     private val bargeIn: Boolean,
     private val inputDevice: AudioDeviceInfo?,
     private val callAudio: Boolean,
     private val frameSource: () -> ByteArray?,
     private val events: Events,
+    private val setupOptions: GeminiSetupOptions = GeminiSetupOptions(),
+    private val echoTailGuardMs: Long = 350L,
+    private val endpointUrl: String = URL,
+    private val enableAudioLoops: Boolean = true,
 ) {
   interface Events {
     fun onReady()
@@ -60,6 +69,10 @@ class GeminiLive(
 
     fun onGoAway()
 
+    fun onToolCall(callId: String, name: String, argsJson: String)
+
+    fun onMicError(reason: String)
+
     fun onFrameSent(jpeg: ByteArray)
 
     fun onClosed(reason: String, wasReady: Boolean)
@@ -68,7 +81,8 @@ class GeminiLive(
   }
 
   companion object {
-    const val MODEL = "gemini-3.8-live"
+    const val DEFAULT_MODEL = "gemini-3.8-live"
+    const val MODEL = DEFAULT_MODEL
     private const val URL =
         "wss://generativelanguage.googleapis.com/ws/" +
             "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
@@ -79,11 +93,13 @@ class GeminiLive(
     // The API takes at most one video frame per second.
     private const val FRAME_INTERVAL_MS = 1000L
     private const val PREVIEW_EVERY = 5
+    private const val MAX_WS_QUEUE_BYTES = 1_500_000L
 
     private val client: OkHttpClient by lazy {
       OkHttpClient.Builder()
           .connectTimeout(15, TimeUnit.SECONDS)
           .readTimeout(0, TimeUnit.MILLISECONDS)
+          .pingInterval(20, TimeUnit.SECONDS)
           .build()
     }
   }
@@ -96,17 +112,21 @@ class GeminiLive(
   private val voiceQueue = LinkedBlockingQueue<ByteArray>()
   @Volatile private var track: AudioTrack? = null
   @Volatile private var speaking = false
+  @Volatile private var lastSpeakingEndedAtMs = 0L
   // Bumped on every interruption so the player drops the chunk it is in the middle of.
-  @Volatile private var playbackEpoch = 0
+  private val playbackEpoch = AtomicInteger(0)
 
   private val threads = CopyOnWriteArrayList<Thread>()
 
   fun start() {
-    val request = Request.Builder().url("$URL?key=$apiKey").build()
+    val sep = if ('?' in endpointUrl) '&' else '?'
+    val request = Request.Builder().url("$endpointUrl${sep}key=$apiKey").build()
     socket = client.newWebSocket(request, listener)
-    threads += thread("gemini-mic") { micLoop() }
-    threads += thread("gemini-voice") { voiceLoop() }
-    threads += thread("gemini-video") { videoLoop() }
+    if (enableAudioLoops) {
+      threads += thread("gemini-mic") { micLoop() }
+      threads += thread("gemini-voice") { voiceLoop() }
+      threads += thread("gemini-video") { videoLoop() }
+    }
   }
 
   /** Safe to call from any thread, more than once. No [Events.onClosed] follows a stop. */
@@ -182,31 +202,42 @@ class GeminiLive(
     events.onClosed(reason, wasReady)
   }
 
-  private fun setupMessage(): String {
-    val setup =
-        JSONObject()
-            .put("model", "models/$MODEL")
-            .put(
-                "generationConfig",
-                JSONObject().put("responseModalities", JSONArray().put("AUDIO")),
-            )
-            .put(
-                "systemInstruction",
-                JSONObject().put("parts", JSONArray().put(JSONObject().put("text", instructions))),
-            )
-    if (fullSetup) {
-      setup
-          .put("inputAudioTranscription", JSONObject())
-          .put("outputAudioTranscription", JSONObject())
-          // Without compression a session with video ends after two minutes.
-          .put("contextWindowCompression", JSONObject().put("slidingWindow", JSONObject()))
-          .put(
-              "sessionResumption",
-              if (resumeHandle != null) JSONObject().put("handle", resumeHandle) else JSONObject(),
-          )
-    }
-    return JSONObject().put("setup", setup).toString()
+  fun isSpeaking(): Boolean = speaking
+
+  fun sendHighResFrame(jpeg: ByteArray): Boolean {
+    val activeSocket = socket ?: return false
+    if (!ready || stopped) return false
+    val payload = Base64.encodeToString(jpeg, Base64.NO_WRAP)
+    val ok = activeSocket.send("{\"realtimeInput\":{\"video\":{\"mimeType\":\"image/jpeg\",\"data\":\"$payload\"}}}")
+    if (ok) events.onFrameSent(jpeg)
+    return ok
   }
+
+  fun sendToolResponse(callId: String, name: String, response: JSONObject): Boolean {
+    val activeSocket = socket ?: return false
+    if (!ready || stopped) return false
+    val fnResponse = JSONObject().put("name", name).put("response", response)
+    if (callId.isNotEmpty()) fnResponse.put("id", callId)
+    val payload =
+        JSONObject()
+            .put(
+                "toolResponse",
+                JSONObject().put("functionResponses", JSONArray().put(fnResponse)),
+            )
+            .toString()
+    return activeSocket.send(payload)
+  }
+
+  private fun setupMessage(): String =
+      AssistantHelpers.buildGeminiSetupMessage(
+          model = model,
+          instructions = instructions,
+          resumeHandle = resumeHandle,
+          fullSetup = fullSetup,
+          enableGoogleSearch = enableGoogleSearch,
+          enableFunctionTools = enableFunctionTools,
+          options = setupOptions,
+      )
 
   private fun handle(text: String) {
     val message = runCatching { JSONObject(text) }.getOrNull() ?: return
@@ -214,6 +245,19 @@ class GeminiLive(
       ready = true
       events.onReady()
       return
+    }
+    val toolCall = message.optJSONObject("toolCall")
+    if (toolCall != null) {
+      val calls = toolCall.optJSONArray("functionCalls")
+      if (calls != null) {
+        for (i in 0 until calls.length()) {
+          val call = calls.optJSONObject(i) ?: continue
+          val id = call.optString("id")
+          val name = call.optString("name")
+          val argsJson = call.optJSONObject("args")?.toString() ?: "{}"
+          if (name.isNotEmpty()) events.onToolCall(id, name, argsJson)
+        }
+      }
     }
     val content = message.optJSONObject("serverContent")
     if (content != null) {
@@ -250,14 +294,17 @@ class GeminiLive(
             AudioFormat.ENCODING_PCM_16BIT,
         )
     if (minSize <= 0) {
-      events.onLog("The microphone does not support 16 kHz")
+      if (!stopped) events.onMicError("Mikrofon 16 kHz desteklemiyor")
       return
     }
-    // The call-audio source is the one Android runs echo cancellation on, which is what lets the
-    // model keep listening while it talks.
+    // Use VOICE_COMMUNICATION only during SCO call routing; HD A2DP keeps VOICE_RECOGNITION
+    // so MIUI audio HAL does not drop into narrowband VoIP/SCO mode.
+    val source =
+        if (callAudio) MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        else MediaRecorder.AudioSource.VOICE_RECOGNITION
     val record =
         AudioRecord(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            source,
             MIC_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
@@ -265,32 +312,45 @@ class GeminiLive(
         )
     if (record.state != AudioRecord.STATE_INITIALIZED) {
       record.release()
-      events.onLog("Could not open the microphone")
+      if (!stopped) events.onMicError("Mikrofon başlatılamadı")
       return
     }
     var echoCanceler: AcousticEchoCanceler? = null
     var noiseSuppressor: NoiseSuppressor? = null
     try {
       if (inputDevice != null) record.setPreferredDevice(inputDevice)
-      if (AcousticEchoCanceler.isAvailable()) {
-        echoCanceler =
-            AcousticEchoCanceler.create(record.audioSessionId)?.also { it.setEnabled(true) }
+      runCatching {
+        if (AcousticEchoCanceler.isAvailable()) {
+          echoCanceler =
+              AcousticEchoCanceler.create(record.audioSessionId)?.also { it.setEnabled(true) }
+        }
       }
-      if (NoiseSuppressor.isAvailable()) {
-        noiseSuppressor = NoiseSuppressor.create(record.audioSessionId)?.also { it.setEnabled(true) }
+      runCatching {
+        if (NoiseSuppressor.isAvailable()) {
+          noiseSuppressor =
+              NoiseSuppressor.create(record.audioSessionId)?.also { it.setEnabled(true) }
+        }
       }
       record.startRecording()
-      val routedTo = record.routedDevice?.productName ?: "unknown"
-      events.onLog("Microphone: $routedTo")
+      val routedTo = record.routedDevice?.productName ?: "bilinmiyor"
+      events.onLog("Mikrofon yönlendirildi: $routedTo")
 
       val chunk = ByteArray(MIC_CHUNK_BYTES)
       val silence = ByteArray(MIC_CHUNK_BYTES)
       val head = "{\"realtimeInput\":{\"audio\":{\"mimeType\":\"audio/pcm;rate=$MIC_RATE\",\"data\":\""
       while (!stopped) {
         val read = record.read(chunk, 0, chunk.size)
-        if (read < 0) break
+        if (read < 0) {
+          if (!stopped) events.onMicError("Mikrofon okuma hatası ($read)")
+          break
+        }
         if (read == 0 || !ready) continue
-        val muted = !bargeIn && speaking
+        val inEchoTail =
+            !bargeIn &&
+                !callAudio &&
+                lastSpeakingEndedAtMs > 0L &&
+                (SystemClock.elapsedRealtime() - lastSpeakingEndedAtMs < echoTailGuardMs)
+        val muted = !bargeIn && (speaking || inEchoTail)
         val payload = Base64.encodeToString(if (muted) silence else chunk, 0, read, Base64.NO_WRAP)
         socket?.send("$head$payload\"}}}")
       }
@@ -349,6 +409,7 @@ class GeminiLive(
         if (chunk == null) {
           if (speaking) {
             speaking = false
+            lastSpeakingEndedAtMs = SystemClock.elapsedRealtime()
             events.onModelSpeaking(false)
           }
           continue
@@ -357,9 +418,9 @@ class GeminiLive(
           speaking = true
           events.onModelSpeaking(true)
         }
-        val epoch = playbackEpoch
+        val epoch = playbackEpoch.get()
         var offset = 0
-        while (offset < chunk.size && !stopped && epoch == playbackEpoch) {
+        while (offset < chunk.size && !stopped && epoch == playbackEpoch.get()) {
           val written = player.write(chunk, offset, chunk.size - offset)
           if (written <= 0) break
           offset += written
@@ -374,8 +435,13 @@ class GeminiLive(
 
   /** The user started talking over the model: drop everything not yet played. */
   private fun interruptPlayback() {
-    playbackEpoch += 1
+    playbackEpoch.incrementAndGet()
     voiceQueue.clear()
+    if (speaking) {
+      speaking = false
+      lastSpeakingEndedAtMs = SystemClock.elapsedRealtime()
+      events.onModelSpeaking(false)
+    }
     val player = track ?: return
     runCatching {
       player.pause()
@@ -398,19 +464,21 @@ class GeminiLive(
       val current = Frames.count
       if (current == lastFrame) {
         misses += 1
-        if (misses == 8 && sent == 0) events.onLog("No video from the glasses yet, the model cannot see")
+        if (misses == 8 && sent == 0) events.onLog("Gözlükten henüz video karesi gelmedi, model göremiyor")
         continue
       }
+      val activeSocket = socket ?: continue
+      if (activeSocket.queueSize() > MAX_WS_QUEUE_BYTES) continue
       val jpeg = frameSource()
       if (jpeg == null) {
         misses += 1
         if (misses == 5 && sent == 0) {
-          events.onLog("Frames arrive in a layout the app cannot read (${Frames.info}), the model cannot see")
+          events.onLog("Gelen kare biçimi okunamadı (${Frames.info}), model göremiyor")
         }
         continue
       }
       lastFrame = current
-      socket?.send(head + Base64.encodeToString(jpeg, Base64.NO_WRAP) + "\"}}}")
+      activeSocket.send(head + Base64.encodeToString(jpeg, Base64.NO_WRAP) + "\"}}}")
       if (sent % PREVIEW_EVERY == 0) events.onFrameSent(jpeg)
       sent += 1
     }

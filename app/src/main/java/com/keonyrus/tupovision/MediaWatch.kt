@@ -3,10 +3,14 @@ package com.keonyrus.tupovision
 import android.app.KeyguardManager
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioTrack
 import android.media.MediaRouter
-import android.media.ToneGenerator
 import android.media.session.MediaController
 import android.media.session.MediaSession
 import android.media.session.MediaSessionManager
@@ -17,6 +21,16 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.atomic.AtomicBoolean
+
+enum class SoundCue {
+  START,
+  STOP,
+  PAUSE,
+  PHOTO,
+  ERROR,
+}
 
 /**
  * Exists only so the user can grant this app "notification access", which Android requires before
@@ -87,6 +101,7 @@ object MediaWatch {
               .getDevices(AudioManager.GET_DEVICES_OUTPUTS)
               .filter {
                 it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
                     it.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
                     it.type == AudioDeviceInfo.TYPE_BLE_SPEAKER
               }
@@ -95,6 +110,37 @@ object MediaWatch {
               .distinct()
         }
         .getOrDefault(emptyList())
+  }
+
+  /** Kurulu yaygın müzik uygulamalarını (paket adı, görünen ad) çiftleri olarak listeler. */
+  fun installedMusicApps(context: Context): List<Pair<String, String>> {
+    val pm = context.packageManager
+    val found = LinkedHashMap<String, String>()
+    val known =
+        listOf(
+            "com.spotify.music",
+            "com.google.android.apps.youtube.music",
+            "com.apple.android.music",
+            "com.miui.player",
+            "deezer.android.app",
+            "com.fizy.android",
+        )
+    for (pkg in known) {
+      runCatching {
+        val info = pm.getApplicationInfo(pkg, 0)
+        found[pkg] = pm.getApplicationLabel(info).toString()
+      }
+    }
+    runCatching {
+      val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_MUSIC)
+      for (res in pm.queryIntentActivities(intent, 0)) {
+        val pkg = res.activityInfo?.packageName ?: continue
+        if (pkg !in found) {
+          found[pkg] = res.loadLabel(pm).toString().ifBlank { pkg }
+        }
+      }
+    }
+    return found.entries.map { it.key to it.value }
   }
 
   /** The Bluetooth device Android has selected for music, or null when it is not Bluetooth. */
@@ -254,15 +300,129 @@ object MediaWatch {
 
   /** A short tone in the glasses: high when the conversation starts, low when it stops. */
   fun beep(starting: Boolean) {
-    Thread {
-          runCatching {
-            val tones = ToneGenerator(AudioManager.STREAM_MUSIC, 70)
-            val tone = if (starting) ToneGenerator.TONE_PROP_BEEP2 else ToneGenerator.TONE_PROP_NACK
-            tones.startTone(tone, 250)
-            Thread.sleep(400)
-            tones.release()
-          }
-        }
+    playCue(if (starting) SoundCue.START else SoundCue.STOP, inCall = false)
+  }
+
+  /** Gözlük veya telefon kulaklığında durum için ayırt edici kısa sesli ton çalar. */
+  fun playCue(cue: SoundCue, inCall: Boolean = false) {
+    EarconPlayer.enqueue(cue, inCall)
+  }
+}
+
+private object EarconPlayer {
+  private const val SAMPLE_RATE = 24_000
+  private const val PRE_ROLL_A2DP_MS = 180
+  private const val PRE_ROLL_CALL_MS = 20
+
+  private data class Request(val cue: SoundCue, val inCall: Boolean)
+
+  private val queue = LinkedBlockingQueue<Request>()
+  private val started = AtomicBoolean(false)
+
+  fun enqueue(cue: SoundCue, inCall: Boolean) {
+    ensureStarted()
+    queue.offer(Request(cue, inCall))
+  }
+
+  private fun ensureStarted() {
+    if (!started.compareAndSet(false, true)) return
+    Thread(
+            {
+              while (true) {
+                val req =
+                    try {
+                      queue.take()
+                    } catch (_: InterruptedException) {
+                      continue
+                    }
+                runCatching { playSync(req) }
+              }
+            },
+            "earcon-player",
+        )
+        .apply { isDaemon = true }
         .start()
+  }
+
+  private fun playSync(req: Request) {
+    if (!req.inCall) {
+      val waitMs = AudioRouter.recentScoTeardownRemainingMs()
+      if (waitMs > 0L) {
+        runCatching { Thread.sleep(waitMs) }
+      }
+    }
+
+    val kind =
+        when (req.cue) {
+          SoundCue.START -> EarconCueKind.START
+          SoundCue.STOP -> EarconCueKind.STOP
+          SoundCue.PAUSE -> EarconCueKind.PAUSE
+          SoundCue.PHOTO -> EarconCueKind.PHOTO
+          SoundCue.ERROR -> EarconCueKind.ERROR
+        }
+    val preRollMs = if (req.inCall) PRE_ROLL_CALL_MS else PRE_ROLL_A2DP_MS
+    val pcm = AssistantHelpers.createEarconPcm(kind, sampleRate = SAMPLE_RATE, preRollMs = preRollMs)
+    if (pcm.isEmpty()) return
+
+    val minBytes =
+        AudioTrack.getMinBufferSize(
+            SAMPLE_RATE,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+    if (minBytes <= 0) return
+
+    val usage =
+        if (req.inCall) AudioAttributes.USAGE_VOICE_COMMUNICATION
+        else AudioAttributes.USAGE_ASSISTANT
+    val contentType =
+        if (req.inCall) AudioAttributes.CONTENT_TYPE_SPEECH
+        else AudioAttributes.CONTENT_TYPE_SONIFICATION
+    val bufferBytes = maxOf(minBytes, 4096)
+
+    val track =
+        AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(usage)
+                    .setContentType(contentType)
+                    .build(),
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setSampleRate(SAMPLE_RATE)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .build(),
+            )
+            .setBufferSizeInBytes(bufferBytes)
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .build()
+
+    if (track.state != AudioTrack.STATE_INITIALIZED) {
+      track.release()
+      return
+    }
+
+    try {
+      track.play()
+      var offset = 0
+      while (offset < pcm.size) {
+        val written = track.write(pcm, offset, pcm.size - offset)
+        if (written <= 0) break
+        offset += written
+      }
+      val totalFrames = pcm.size / 2
+      val expectedDurationMs = (totalFrames * 1000L) / SAMPLE_RATE
+      val deadline = SystemClock.elapsedRealtime() + expectedDurationMs + 250L
+      while (SystemClock.elapsedRealtime() < deadline) {
+        if (track.playbackHeadPosition >= totalFrames) break
+        Thread.sleep(20L)
+      }
+      Thread.sleep(30L)
+    } finally {
+      runCatching { track.stop() }
+      track.release()
+    }
   }
 }

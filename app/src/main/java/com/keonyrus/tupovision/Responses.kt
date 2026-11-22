@@ -2,8 +2,7 @@ package com.keonyrus.tupovision
 
 import android.util.Base64
 import java.io.IOException
-import java.net.HttpURLConnection
-import java.net.URL
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -12,6 +11,12 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.ConnectionPool
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -20,6 +25,16 @@ class ApiException(val status: Int, message: String) : IOException(message)
 /** One finished exchange kept as text so follow-up questions have context. */
 data class Turn(val question: String, val answer: String)
 
+internal sealed interface SseEventResult {
+  data class Delta(val text: String) : SseEventResult
+
+  data object Completed : SseEventResult
+
+  data class Error(val message: String) : SseEventResult
+
+  data object Ignore : SseEventResult
+}
+
 /**
  * The OpenAI Responses API called with a ChatGPT plan token. Plan usage only accepts streamed,
  * unstored requests, takes text and images but no audio, and rejects sampling parameters.
@@ -27,6 +42,17 @@ data class Turn(val question: String, val answer: String)
 object Responses {
   private const val RESPONSES_URL = "https://api.openai.com/v1/responses"
   private const val MODELS_URL = "https://api.openai.com/v1/models"
+  private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+  private val client: OkHttpClient by lazy {
+    OkHttpClient.Builder()
+        .connectionPool(ConnectionPool(5, 5, TimeUnit.MINUTES))
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
+        .retryOnConnectionFailure(true)
+        .build()
+  }
 
   fun buildBody(
       model: String,
@@ -35,6 +61,8 @@ object Responses {
       question: String,
       jpeg: ByteArray?,
       reasoningEffort: String?,
+      highDetailImage: Boolean = false,
+      enableWebSearch: Boolean = false,
   ): JSONObject {
     val input = JSONArray()
     for (turn in history) {
@@ -43,14 +71,17 @@ object Responses {
     }
     val content = JSONArray().put(JSONObject().put("type", "input_text").put("text", question))
     if (jpeg != null) {
-      content.put(
+      val imageObj =
           JSONObject()
               .put("type", "input_image")
               .put(
                   "image_url",
                   "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP),
-              ),
-      )
+              )
+      if (highDetailImage) {
+        imageObj.put("detail", "high")
+      }
+      content.put(imageObj)
     }
     input.put(JSONObject().put("role", "user").put("content", content))
 
@@ -64,6 +95,9 @@ object Responses {
     if (reasoningEffort != null) {
       body.put("reasoning", JSONObject().put("effort", reasoningEffort))
     }
+    if (enableWebSearch) {
+      body.put("tools", JSONArray().put(JSONObject().put("type", "web_search")))
+    }
     return body
   }
 
@@ -72,41 +106,52 @@ object Responses {
           .put("role", role)
           .put("content", JSONArray().put(JSONObject().put("type", type).put("text", text)))
 
+  internal fun parseSseEventLine(line: String): SseEventResult {
+    if (!line.startsWith("data:")) return SseEventResult.Ignore
+    val data = line.substring(5).trim()
+    if (data.isEmpty() || data == "[DONE]") return SseEventResult.Ignore
+    val event = runCatching { JSONObject(data) }.getOrNull() ?: return SseEventResult.Ignore
+    return when (event.optString("type")) {
+      "response.output_text.delta" -> {
+        val delta = event.optString("delta")
+        if (delta.isEmpty()) SseEventResult.Ignore else SseEventResult.Delta(delta)
+      }
+      "response.completed" -> SseEventResult.Completed
+      "response.failed",
+      "response.incomplete",
+      "error" -> SseEventResult.Error(eventErrorMessage(event))
+      else -> SseEventResult.Ignore
+    }
+  }
+
   /** Emits the answer text piece by piece and completes when the response is finished. */
-  fun stream(token: String, body: JSONObject): Flow<String> = channelFlow {
-    val connectionRef = AtomicReference<HttpURLConnection?>(null)
+  fun stream(token: String, body: JSONObject, url: String = RESPONSES_URL): Flow<String> = channelFlow {
+    val callRef = AtomicReference<Call?>(null)
     launch(Dispatchers.IO) {
       try {
-        val connection = URL(RESPONSES_URL).openConnection() as HttpURLConnection
-        connectionRef.set(connection)
-        connection.requestMethod = "POST"
-        connection.doOutput = true
-        connection.connectTimeout = 15000
-        connection.readTimeout = 60000
-        connection.setRequestProperty("Authorization", "Bearer $token")
-        connection.setRequestProperty("Content-Type", "application/json")
-        connection.setRequestProperty("Accept", "text/event-stream")
-        connection.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
-
-        val status = connection.responseCode
-        if (status !in 200..299) {
-          val text = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-          throw ApiException(status, errorMessage(status, text))
-        }
-
-        connection.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+        val request =
+            Request.Builder()
+                .url(url)
+                .header("Authorization", "Bearer $token")
+                .header("Accept", "text/event-stream")
+                .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+                .build()
+        val call = client.newCall(request)
+        callRef.set(call)
+        call.execute().use { response ->
+          val responseBody = response.body
+          if (!response.isSuccessful) {
+            val text = responseBody?.string().orEmpty()
+            throw ApiException(response.code, errorMessage(response.code, text))
+          }
+          val source = responseBody?.source() ?: throw ApiException(0, "Empty response body")
           readLoop@ while (true) {
-            val line = reader.readLine() ?: break
-            if (!line.startsWith("data:")) continue
-            val data = line.substring(5).trim()
-            if (data.isEmpty() || data == "[DONE]") continue
-            val event = runCatching { JSONObject(data) }.getOrNull() ?: continue
-            when (event.optString("type")) {
-              "response.output_text.delta" -> send(event.optString("delta"))
-              "response.completed" -> break@readLoop
-              "response.failed",
-              "response.incomplete",
-              "error" -> throw ApiException(0, eventErrorMessage(event))
+            val line = source.readUtf8Line() ?: break
+            when (val parsed = parseSseEventLine(line)) {
+              is SseEventResult.Delta -> send(parsed.text)
+              SseEventResult.Completed -> break@readLoop
+              is SseEventResult.Error -> throw ApiException(0, parsed.message)
+              SseEventResult.Ignore -> Unit
             }
           }
         }
@@ -114,31 +159,35 @@ object Responses {
       } catch (e: CancellationException) {
         throw e
       } catch (e: Throwable) {
-        close(e)
+        if (callRef.get()?.isCanceled() == true) {
+          close()
+        } else {
+          close(e)
+        }
       }
     }
     awaitClose {
-      // Closing a TLS socket touches the network, so it must not run on the main thread.
-      val connection = connectionRef.get()
-      if (connection != null) Thread { runCatching { connection.disconnect() } }.start()
+      // OkHttp Call.cancel() is non-blocking and safe from any thread.
+      callRef.get()?.cancel()
     }
   }
 
   /** Model ids this account may use with its plan; empty when the list cannot be read. */
-  suspend fun listModels(token: String): List<String> =
+  suspend fun listModels(token: String, url: String = MODELS_URL): List<String> =
       withContext(Dispatchers.IO) {
-        val connection = URL(MODELS_URL).openConnection() as HttpURLConnection
-        try {
-          connection.connectTimeout = 15000
-          connection.readTimeout = 20000
-          connection.setRequestProperty("Authorization", "Bearer $token")
-          connection.setRequestProperty("Accept", "application/json")
-          val status = connection.responseCode
-          if (status !in 200..299) {
-            val text = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            throw ApiException(status, errorMessage(status, text))
+        val request =
+            Request.Builder()
+                .url(url)
+                .header("Authorization", "Bearer $token")
+                .header("Accept", "application/json")
+                .get()
+                .build()
+        client.newCall(request).execute().use { response ->
+          val bodyText = response.body?.string().orEmpty()
+          if (!response.isSuccessful) {
+            throw ApiException(response.code, errorMessage(response.code, bodyText))
           }
-          val root = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
+          val root = JSONObject(bodyText)
           val items = root.optJSONArray("models") ?: root.optJSONArray("data") ?: JSONArray()
           val result = ArrayList<String>()
           for (i in 0 until items.length()) {
@@ -149,8 +198,6 @@ object Responses {
             if (id.isNotEmpty()) result.add(id)
           }
           result
-        } finally {
-          connection.disconnect()
         }
       }
 

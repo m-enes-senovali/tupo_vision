@@ -18,6 +18,16 @@
     <queries>
         <!-- Meta AI, the companion app of the glasses -->
         <package android:name="com.facebook.stella" />
+        <package android:name="com.spotify.music" />
+        <package android:name="com.google.android.apps.youtube.music" />
+        <package android:name="com.apple.android.music" />
+        <package android:name="com.miui.player" />
+        <package android:name="deezer.android.app" />
+        <package android:name="com.fizy.android" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.APP_MUSIC" />
+        </intent>
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
@@ -64,7 +74,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:scheme="tupovision" />
+                <data android:scheme="senovalitupovision" />
             </intent-filter>
         </activity>
 
@@ -72,7 +82,7 @@
         <service
             android:name=".MediaWatchService"
             android:exported="true"
-            android:label="Tupo Vision standby"
+            android:label="Tupo Vision TR Bekleme Modu"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />

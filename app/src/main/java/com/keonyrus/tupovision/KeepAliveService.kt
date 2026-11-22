@@ -24,7 +24,8 @@ class KeepAliveService : Service() {
     private const val TAG = "TupoVision"
     private const val CHANNEL_ID = "conversation"
     private const val NOTIFICATION_ID = 1001
-    private const val ACTION_STOP = "com.keonyrus.tupovision.STOP"
+    private val ACTION_STOP = "${BuildConfig.APPLICATION_ID}.STOP"
+    private const val EXTRA_FROM_NOTIFICATION = "from_notification"
     private const val WAKELOCK_TAG = "TupoVision::Conversation"
     // Backstop for a leaked lock; the normal release is in releaseWakeLock().
     private const val WAKELOCK_TIMEOUT_MS = 3L * 60L * 60L * 1000L
@@ -53,11 +54,17 @@ class KeepAliveService : Service() {
     try {
       startForeground(NOTIFICATION_ID, buildNotification(), serviceTypes())
     } catch (e: Exception) {
-      Log.e(TAG, "Could not enter the foreground", e)
+      Log.e(TAG, "Ön plan servisi başlatılamadı", e)
+      if (intent?.action == ACTION_STOP && intent.getBooleanExtra(EXTRA_FROM_NOTIFICATION, false)) {
+        Engine.stopFromNotification()
+      }
       stopSelf()
       return START_NOT_STICKY
     }
     if (intent?.action == ACTION_STOP) {
+      if (intent.getBooleanExtra(EXTRA_FROM_NOTIFICATION, false)) {
+        Engine.stopFromNotification()
+      }
       releaseWakeLock()
       stopForeground(STOP_FOREGROUND_REMOVE)
       stopSelf()
@@ -87,7 +94,7 @@ class KeepAliveService : Service() {
   private fun buildNotification(): Notification {
     val manager = getSystemService(NotificationManager::class.java)
     manager.createNotificationChannel(
-        NotificationChannel(CHANNEL_ID, "Conversation", NotificationManager.IMPORTANCE_LOW).apply {
+        NotificationChannel(CHANNEL_ID, "Sohbet", NotificationManager.IMPORTANCE_LOW).apply {
           setShowBadge(false)
         },
     )
@@ -99,12 +106,22 @@ class KeepAliveService : Service() {
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
+    val stopPending =
+        PendingIntent.getForegroundService(
+            this,
+            1,
+            Intent(this, KeepAliveService::class.java)
+                .setAction(ACTION_STOP)
+                .putExtra(EXTRA_FROM_NOTIFICATION, true),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
     return Notification.Builder(this, CHANNEL_ID)
-        .setContentTitle("Tupo Vision is running")
-        .setContentText("In a conversation, or on standby for a gesture")
+        .setContentTitle("Tupo Vision TR çalışıyor")
+        .setContentText("Sohbet aktif veya gözlük hareketi bekleniyor")
         .setSmallIcon(R.drawable.ic_stat)
         .setOngoing(true)
         .setContentIntent(open)
+        .addAction(Notification.Action.Builder(null, "Durdur", stopPending).build())
         .setCategory(Notification.CATEGORY_SERVICE)
         .build()
   }

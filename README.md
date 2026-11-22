@@ -1,182 +1,97 @@
-# Tupo Vision
+# Tupo Vision TR
 
-**Your own AI assistant in Ray-Ban Meta glasses.** An open-source Android app that lets the
-glasses talk to ChatGPT or Gemini instead of Meta AI, and lets the model see through the glasses
-camera.
+**Ray-Ban Meta akıllı gözlükler için erişilebilir, Türkçe odaklı ve çevrimdışı destekli açık kaynak Android yapay zeka yardımcısı.**
 
-- **GPT on your ChatGPT plan, no API key.** Sign in with ChatGPT and requests count against the
-  Go, Plus or Pro plan you already pay for.
-- **Live voice with Gemini Live.** The model hears and speaks by itself, you can interrupt it,
-  and it watches the camera continuously. Needs a Gemini API key.
-- **Sees what you see.** Frames come from the glasses camera, not the phone.
-- **Hands stay free.** The phone can sit in a pocket with the screen off. A tap on the temple
-  pauses and resumes.
+Bu depo, [KeonyRus/tupo_vision](https://github.com/KeonyRus/tupo_vision) projesinin MIT lisanslı fork'udur. Resmi Meta AI uygulamasını telefondan kaldırmadan yan yana çalışır; gözlük kamerasını kullanarak doğrudan ChatGPT aboneliğinizle (OAuth PKCE) veya Gemini Live WebSocket API ile konuşmanıza, internetsiz ortamlarda ise gömülü Google ML Kit ile yerel metin (OCR) ve barkod/QR okuma yapmanıza olanak tanır.
 
-Built and tested on Ray-Ban Meta Gen 1. Meta's Wearables Device Access Toolkit, which the app is built
-on, also covers Ray-Ban Meta Gen 2, Oakley Meta and Meta Ray-Ban Display; those are untested
-here. Not affiliated with Meta, OpenAI or Google.
+Bu fork'un temel odak noktaları; **Jieshuo ve TalkBack ekran okuyucu uyumu**, **48 kHz A2DP ses kalitesinin korunması**, **düşük gecikme** ve **görme engelli kullanıcılar için günlük yaşam profilleridir**.
 
-> **Status: a personal project, no support.** I made this for myself: one pair of Ray-Ban Meta
-> Gen 1 and one Android phone. It works there; expect rough edges elsewhere. All the code was
-> written by Claude Fable 5.2 (Anthropic); I said what I wanted and tested it on my glasses. I do
-> not plan to maintain it and may not answer issues. It is MIT licensed, so fork it and do what
-> you want.
-
-## What you need
-
-- Ray-Ban Meta glasses, paired with the **Meta AI** app on your phone
-- An Android phone with Android 12 or newer
-- One of:
-  - a ChatGPT **Go, Plus or Pro** plan, or
-  - a **Gemini API key** from [aistudio.google.com](https://aistudio.google.com) (takes a minute)
-
-## Install
-
-1. **Download** `tupo-vision.apk` from the [latest release](../../releases/latest) on your phone
-   and open it. Android will ask to allow installing from your browser: allow it.
-2. **Turn on Developer Mode in Meta AI.** Put the glasses on so they are connected, then in the
-   Meta AI app open **Settings → App info**, tap **App version** five times, switch
-   **Developer Mode** on and tap **Enable**. On the same screen, tap **Install** next to
-   **Device Access Toolkit** if it is not installed.
-3. **Open Tupo Vision** and tap **Grant permissions**.
-4. Tap **Link glasses through Meta AI** and confirm in Meta AI.
-5. **Pick an assistant:**
-   - *ChatGPT plan:* tap **Continue with ChatGPT**, sign in, and allow the app to use your plan.
-   - *Gemini Live:* switch on **Live voice**, paste your Gemini API key, tap **Save key**.
-6. Tap **Start conversation** and talk. The first time, Meta AI asks for access to the glasses
-   camera.
-
-That is all. Next time, only step 6.
-
-## Using it
-
-- **Pause and resume:** one tap on the temple of the glasses.
-- **Stop:** the Stop button in the app.
-- **Standby (experimental):** start and stop from the glasses. In Meta AI, assign **Tap and hold**
-  to **Music** (Spotify is the default here). Switch on **Standby** in Tupo Vision and grant
-  notification access. A tap and hold then makes the glasses start the music app; if the phone is
-  locked or its screen is off, Tupo Vision pauses the music and toggles the conversation. Music
-  you start with the phone in your hand is left alone, and so is music that plays through a car
-  or other headphones: switch Standby on with the glasses on, and it follows that audio device
-  only. Android gives an app the name of the
-  playing music app only with notification access; Tupo Vision reads no notifications.
-- **ChatGPT mode** listens for a phrase, sends it with one camera frame, and reads the answer
-  aloud. Set your **Speech language** in Settings (for example `en-US` or `ru-RU`). An optional
-  wake word makes it ignore everything that does not contain that word.
-- **Live voice mode** is a continuous conversation. The model picks up your language by itself.
-  If it keeps cutting itself off, turn off **Interrupt by voice** in Settings.
-
-## Which mode to pick
-
-| | ChatGPT plan | Gemini Live |
-|---|---|---|
-| Needs | Go, Plus or Pro plan | Gemini API key |
-| Feels like | Ask, wait a moment, hear the answer | A live conversation |
-| Voice | Your phone's text-to-speech | The model's own voice |
-| Interrupting | No | Yes |
-| Camera | One frame per question | About one frame a second |
-| Cost | Included in your plan's limits | Google's free tier or per-minute rates |
-
-The ChatGPT sign-in does not accept audio, which is why that mode recognises and synthesises
-speech on the phone. The real ChatGPT voice mode is not available to other apps on a plan.
-
-## Troubleshooting
-
-- **Meta AI says “Error while opening link”.** Developer Mode is not on. Switch it off and on
-  again in Meta AI (step 2), force-stop and reopen Meta AI, then link again.
-- **ChatGPT sign-in fails with a network error.** Some phones cut background apps off the
-  network. Tap **Continue with ChatGPT** again. If it repeats, turn off data saver and battery
-  saver for the sign-in, and check that a VPN or DNS filter is not blocking the app.
-- **The model cannot see.** Check the line under the Start button: it shows the stream state and
-  the last frame. The log says when no video arrives.
-- **Answers are quiet.** With the glasses microphone on, the volume follows the phone's call
-  volume.
-- **Taps on the glasses no longer control music.** Seen on Ray-Ban Meta Gen 1: while Tupo Vision
-  is open, play/pause and skip taps on the temple do nothing. Close the app (swipe it away from
-  recent apps) and they work again.
-- **Anything else:** scroll down and tap **Copy log**; the log usually says what went wrong. You
-  can attach it to an issue, but see the status note at the top: there may be no answer.
-
-## Privacy and security
-
-- The app has no server and no analytics of its own. Audio, frames and text go straight from your
-  phone to the assistant you picked: OpenAI in ChatGPT mode, Google in Gemini Live mode. In
-  ChatGPT mode, speech is recognised and synthesised by your phone's own speech services.
-- ChatGPT tokens and the Gemini key are stored on the phone only, encrypted with a key held in
-  the Android Keystore. They are never written to the log.
-- Meta's SDK is asked not to send its own analytics and crash reports from this app.
-- The camera in your glasses records people around you. Follow the law where you are and tell
-  people when the assistant is on.
-
-### Checking a download
-
-Each release note states the SHA-256 of the APK and which key signed it. Builds signed with the
-project key carry this certificate fingerprint:
-
-```
-EF:D9:96:B9:3B:08:81:72:AE:8F:F5:14:37:F9:60:FF:DA:E5:51:97:B2:B9:78:47:2C:25:DA:BA:F3:0E:42:AE
-```
-
-Check it with `apksigner verify --print-certs tupo-vision.apk`. Install the app only from this
-repository's releases.
-
-## How it works
-
-```
-ChatGPT mode
-  glasses mic → speech recognition on the phone → question + camera frame
-      → OpenAI Responses API on your ChatGPT plan → text-to-speech → glasses speakers
-
-Gemini Live mode
-  glasses mic + one camera frame a second → Gemini Live API over one WebSocket
-      → the model's voice → glasses speakers
-```
-
-- Camera and session: [Meta Wearables Device Access Toolkit](https://github.com/facebook/meta-wearables-dat-android)
-- ChatGPT plan: [Sign in with ChatGPT](https://developers.openai.com/siwc) for open-source apps
-- Live voice: [Gemini Live API](https://ai.google.dev/gemini-api/docs/live)
-
-## Limitations
-
-- The app runs in Meta's Developer Mode. Publishing it to a store would need registration in
-  Meta's Wearables Developer Center.
-- Starting a conversation needs the phone. Pausing and resuming does not. Starting by a tap
-  gesture was tried and does not work: the glasses stop forwarding taps to the phone while the
-  app is open.
-- Sign in with ChatGPT for open-source apps is a preview, and its terms can change.
-- Glasses microphones reach the phone at phone-call quality over Bluetooth.
-
-## Build it yourself
-
-```
-./gradlew assembleDebug
-```
-
-Needs JDK 17 and Android SDK 36. GitHub Actions builds every push to `main` and publishes the
-APK as the `latest` release.
-
-The published APK is signed with a private key kept in the repository's Actions secrets
-(`SIGNING_KEYSTORE_B64`, `SIGNING_KEYSTORE_PASSWORD`). A fork has no such secrets, so its builds
-are signed with a throwaway key and cannot be installed over the published app. To give a fork a
-stable key of its own, create a PKCS#12 keystore with the alias `tupovision` and add those two
-secrets.
-
-## Similar projects
-
-Other open-source ways to put your own assistant on these glasses:
-
-- [VisionClaw](https://github.com/Intent-Lab/VisionClaw): Gemini Live with agent actions, iOS and Android
-- [MetaLens AI](https://github.com/przemek-nowicki/meta-lens-ai): ChatGPT, Gemini and Grok with your API keys, Android
-- [OpenVision](https://github.com/rayl15/OpenVision): several cloud and on-device models, iOS
-
-## License
-
-MIT for the code in this repository. Meta's SDK is a dependency and is covered by the Meta
-Wearables Developer Terms.
+> **Durum ve Test Kapsamı:** Orijinal taban Ray-Ban Meta Gen 1 üzerinde geliştirilmiştir. Bu fork, **Ray-Ban Meta Gen 3** ve **Redmi Note 9 Pro (Android 12 / MIUI)** hedef alınarak genişletilmiştir. `46` JVM / MockWebServer / Robolectric / Compose erişilebilirlik testi ve `Android 12 (API 31)` emülatöründe `4` enstrümantasyon testi (`Espresso AccessibilityChecks`, gömülü ML Kit OCR ve `MockDeviceKit` sanal gözlük akışı dahil) doğrulanmıştır. Fiziksel gözlük üzerinde canlı Bluetooth A2DP/SCO ses kabul testleri devam etmektedir. Meta, OpenAI veya Google ile resmi bir bağı yoktur.
 
 ---
 
-**По-русски.** Tupo Vision ставит в очки Ray-Ban Meta своего ассистента: GPT по подписке ChatGPT
-без API-ключа или живой голос Gemini Live. Установка: скачай APK из релиза, включи Developer Mode
-в Meta AI (Settings → App info, пять тапов по App version), выдай разрешения, привяжи очки,
-выбери ассистента и нажми Start conversation.
+## Öne Çıkan Yenilikler (Fork Katkıları)
+
+- **Çift Ses Profili (HD A2DP vs. Gözlük Mikrofonu SCO):**
+  - Varsayılan `HD_A2DP` profilinde telefon `AudioManager.MODE_NORMAL` durumunda kalır; Gemini Live, ChatGPT TTS ve Jieshuo/TalkBack sesi 48 kHz A2DP medya kalitesinde akmaya devam eder (`VOICE_RECOGNITION` + `350 ms` `echoTailGuardMs` yankı koruması ile).
+  - Telefon çantadayken kullanım için `GLASSES_SCO` profili korunmuştur; BT mikrofonu bulunamazsa ses bozulmadan güvenli biçimde `HD_A2DP` moduna geri düşer.
+- **Ekran Okuyucu Dostu Sessiz Oturum ve PCM Earconlar:**
+  - Aktif görüşme sırasında faz değişikliklerinin (`Dinliyor`, `Düşünüyor`, `Konuşuyor`) ekran okuyucu tarafından otomatik okunup asistanın sesini bastırması engellenir (`quietSessionAccessibility`); kullanıcı isterse alana dokunup durumu yine okuyabilir.
+  - Sert `ToneGenerator` bip sesleri yerine serileştirilmiş, sıfir DC sapmalı kosinüs zarflı PCM earconlar (`180 ms` A2DP uyanış tamponlu) kullanılır.
+  - Tüm arayüzde sıfır emoji, semantik `heading()`, `Role.RadioButton` / `Role.Switch`, `mergeDescendants` ve `stateDescription` uygulanmıştır.
+- **Uygulamaya Gömülü Çevrimdışı ML Kit (OCR + Barkod/QR) ve Emniyet Ağı:**
+  - `com.google.mlkit:text-recognition:16.0.1` ve `com.google.mlkit:barcode-scanning:17.3.0` modelleri APK içine gömülüdür; internet gerekmeden çalışır.
+  - Çok sütunlu fiş ve kutularda satırların karışmaması için koordinat bazlı blok sıralaması (`orderOcrBlocks`) ve harici ağ çağrısı yapmayan Türkçe barkod/QR seslendirmesi içerir.
+  - ChatGPT modunda ağ bağlantısı koptuğunda (`IOException`) otomatik olarak yerel ML Kit + TTS okumasına düşen emniyet ağına sahiptir.
+- **4 Bağlamsal Uzman Profil ve Yerel Komutlar:**
+  - `Hızlı Tarama`, `Belge, Fiş ve İlaç`, `Market ve Etiket`, `Mekansal Yürüyüş ve Engel` profilleri ana ekrandan, ChatGPT yerel sesli komutlarıyla (`"Belge moduna geç"`, `"Çevrimdışı oku"`, `"Tekrar oku"`) veya Gemini Live `Function Calling` araçlarıyla (`switch_profile`, `scan_local`, `capture_hd_photo`, `end_conversation`) yönetilebilir.
+- **Ağ ve Gecikme İyileştirmeleri:**
+  - `Responses.kt` HTTP/2 bağlantı havuzlu `OkHttp 4.12.0` SSE istemcisine taşınmıştır; `ChatSpeedProfile.FAST` varsayılan yapılmıştır.
+  - `GeminiLive.kt` kurulumunda seçilebilir ses (`Kore`, `Zephyr`, `Orus`, `Aoede`), `VadSensitivity` (`FAST`, `BALANCED`, `PATIENT`), `thinkingBudget` ve 6 kademeli geri düşüş merdiveni bulunur.
+- **Sanal Gözlük Debug Paneli (`MockDeviceKit`):**
+  - Yalnızca `debug` derlemesinde bulunan `MockBridge.kt`, fiziksel gözlük olmadan örnek Türkçe ilaç etiketi fotoğrafı, arka kamera bağlama ve capture tuşu simülasyonu sunar.
+
+---
+
+## Gereksinimler
+
+- **Meta AI** uygulamasıyla eşleştirilmiş **Ray-Ban Meta** akıllı gözlük (veya geliştirici testleri için `debug` derlemesinde `MockDeviceKit`)
+- **Android 12 (API 31)** veya üzeri Android telefon
+- Asistan için aşağıdakilerden biri:
+  - **ChatGPT Go, Plus veya Pro** aboneliği (API anahtarı gerekmez)
+  - veya [aistudio.google.com](https://aistudio.google.com) üzerinden alınmış **Gemini API anahtarı**
+
+---
+
+## Kurulum ve İlk Bağlantı
+
+1. **Meta AI Geliştirici Modunu Açın:** Gözlük açık ve bağlıyken Meta AI uygulamasında **Ayarlar > Uygulama Bilgileri** ekranına girin, **Uygulama Sürümü** satırına art arda 5 kez dokunun, **Geliştirici Modu** anahtarını açıp **Etkinleştir** deyin. Aynı ekranda varsa **Device Access Toolkit** yanındaki **Yükle** düğmesine basın.
+2. **Tupo Vision TR APK'sını Kurun:** [Releases](../../releases/latest) sayfasından APK'yı indirin (`com.senovali.tupovision` kimliğiyle orijinal `tupo_vision` ile yan yana kurulabilir).
+3. **İzin ve Bağlantı:** Uygulamayı açıp Bluetooth/mikrofon izinlerini verin, **Meta AI Üzerinden Gözlüğü Bağla** düğmesine dokunup onaylayın.
+4. **Asistan Seçimi:** ChatGPT aboneliğinizle giriş yapın veya **Canlı Ses Modu (Gemini Live)** anahtarını açıp Gemini API anahtarınızı kaydedin.
+
+---
+
+## Derleme ve Test Altyapısı
+
+Projede 4 katmanlı otomatik doğrulama altyapısı kuruludur (JDK 17 ve Android SDK 36 gerektirir):
+
+```bash
+# 1. Tum JVM, MockWebServer SSE/WebSocket, Robolectric (API 31 & 35) ve Compose Erisilebilirlik testleri (46 test)
+./gradlew testDebugUnitTest
+
+# 2. Debug, Release APK ve AndroidTest paketlerinin derlenmesi
+./gradlew assembleDebug assembleRelease assembleDebugAndroidTest
+
+# 3. Bagli Android cihaz veya API 31 emulator uzerinde Espresso AccessibilityChecks + canli ML Kit + MockDeviceKit testleri (4 test)
+./gradlew connectedDebugAndroidTest
+```
+
+### Önemli Not: İmzalama Anahtarı
+
+Üretim APK'ları yerel veya GitHub Actions gizli anahtarları (`SIGNING_KEYSTORE_B64`, `SIGNING_KEYSTORE_PASSWORD`) ile imzalanır. Fork'larda bu gizli anahtarlar bulunmadığından derlemeler geçici debug anahtarıyla imzalanır; farklı anahtarlarla imzalanan APK'lar birbirinin üzerine doğrudan güncellenemez (önce eskisini kaldırmak gerekir).
+
+---
+
+## English Summary & Contributing
+
+**Tupo Vision TR** is an accessible, open-source fork of [KeonyRus/tupo_vision](https://github.com/KeonyRus/tupo_vision) tailored for blind and low-vision users using Ray-Ban Meta smart glasses (with full Turkish and TalkBack/Jieshuo screen reader optimization).
+
+Key additions in this fork:
+- **Dual Audio Profile (`HD_A2DP` vs. `GLASSES_SCO`):** Keeps `AudioManager.MODE_NORMAL` + `USAGE_ASSISTANT` + `VOICE_RECOGNITION` by default so screen readers and assistant audio remain at 48 kHz A2DP quality instead of dropping to narrowband HFP/SCO.
+- **Screen Reader Quiet Mode & Zero-DC PCM Earcons:** Suppresses disruptive `liveRegion` chatter during active sessions while keeping full semantic descriptions, `Role.RadioButton`/`Role.Switch`, and zero-emoji UI.
+- **Bundled Offline ML Kit (OCR + Barcode/QR):** On-device `text-recognition:16.0.1` and `barcode-scanning:17.3.0` with multi-column `orderOcrBlocks` sorting and an automatic offline fallback when network `IOException` occurs.
+- **4 Contextual Profiles & Voice Commands:** `QUICK`, `DOCUMENT`, `MARKET`, `WALK` profiles switchable via UI, local voice commands, or Gemini Live `functionDeclarations` (`switch_profile`, `scan_local`).
+- **4-Tier Test Suite:** `46` JVM/MockWebServer/Robolectric/Compose accessibility unit tests + `4` `connectedDebugAndroidTest` tests (`Espresso AccessibilityChecks`, bundled ML Kit `.so`, `MockDeviceKit`, real API 31 `AudioManager`).
+
+Contributions, accessibility improvements, and PRs are welcome on `main` or feature branches.
+
+---
+
+## Lisans / License
+
+Bu depo **3 ayrı lisans katmanına** tabidir:
+
+1. **Kaynak Kod (`MIT License`):** Bu depodaki Kotlin ve kaynak kodları [LICENSE](LICENSE) dosyası kapsamında MIT lisanslıdır (`Copyright (c) 2026 KeonyRus`, `Copyright (c) 2026 Muhammet Enes Senovali`).
+2. **Meta Wearables Device Access Toolkit (`mwdat`):** Açık kaynak değildir; **Meta Wearables Developer Terms** ve **Acceptable Use Policy** kapsamındadır. Depoda yalnızca Maven bağımlılık referansları yer alır; mağaza dağıtımı için Meta Wearables Developer Center kaydı/onayı gerekir.
+3. **Google ML Kit (`text-recognition`, `barcode-scanning`):** İkili SDK ve gömülü modeller **ML Kit Terms of Service / Google APIs Terms of Service** kapsamındadır; tersine mühendislikle model çıkarılması yasaktır.

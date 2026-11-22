@@ -35,7 +35,7 @@ object ChatGptAuth {
   private const val TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token"
   private const val RESOURCE = "https://api.openai.com/v1"
   private const val DYNAMIC_CLIENT_ID = "dynamic_agent_client"
-  private const val AGENT_NAME = "Tupo Vision"
+  private const val AGENT_NAME = "Tupo Vision TR"
   private const val PLAN_SCOPE = "chatgpt.tokens.use.direct"
   private const val SCOPE = "openid profile email offline_access resource.invoke $PLAN_SCOPE"
   private const val CALLBACK_PATH = "/auth/callback"
@@ -105,7 +105,7 @@ object ChatGptAuth {
       openBrowser(authorizationUrl)
 
       val callback = withContext(Dispatchers.IO) { awaitCallback(server, state) }
-      log("The browser returned the sign-in code, requesting tokens")
+      log("Tarayıcı giriş kodunu döndürdü, jetonlar isteniyor")
       // The browser is still on top here, so the app counts as a background app, and saver modes
       // cut background apps off the network. Come back to the screen first, then keep trying
       // while the network opens up.
@@ -130,28 +130,34 @@ object ChatGptAuth {
   }
 
   /** A valid access token, refreshed when it is close to expiry. */
-  suspend fun accessToken(context: Context, forceRefresh: Boolean = false): String =
+  suspend fun accessToken(
+      context: Context,
+      forceRefresh: Boolean = false,
+      log: (String) -> Unit = {},
+  ): String =
       refreshMutex.withLock {
         val appContext = context.applicationContext
-        val current = load(appContext) ?: throw AuthException("Sign in to ChatGPT")
+        val current = load(appContext) ?: throw AuthException("ChatGPT hesabına giriş yapın")
         if (!forceRefresh && System.currentTimeMillis() < current.expiresAtMs) {
           return@withLock current.access
         }
         val token =
             try {
-              postForm(
-                  mapOf(
-                      "grant_type" to "refresh_token",
-                      "client_id" to current.clientId,
-                      "refresh_token" to current.refresh,
-                      "resource" to RESOURCE,
-                  ),
-              )
+              retryWhileOffline(log) {
+                postForm(
+                    mapOf(
+                        "grant_type" to "refresh_token",
+                        "client_id" to current.clientId,
+                        "refresh_token" to current.refresh,
+                        "resource" to RESOURCE,
+                    ),
+                )
+              }
             } catch (e: TokenEndpointException) {
               // 400/401 here means the refresh token is dead; a network blip is not.
               if (e.status == 400 || e.status == 401) {
                 signOut(appContext)
-                throw AuthException("The ChatGPT session expired, sign in again")
+                throw AuthException("ChatGPT oturumu sona erdi, yeniden giriş yapın")
               }
               throw e
             }
@@ -177,7 +183,7 @@ object ChatGptAuth {
         if (System.currentTimeMillis() > deadline) throw e
         if (!announced) {
           announced = true
-          log("The app has no network (${e.javaClass.simpleName}), retrying")
+          log("Uygulama ağa ulaşamıyor (${e.javaClass.simpleName}), yeniden deneniyor")
         }
         delay(pause)
         pause = (pause * 2).coerceAtMost(3000L)
@@ -223,40 +229,40 @@ object ChatGptAuth {
         }
         val error = uri.getQueryParameter("error")
         if (error != null) {
-          respond(client.getOutputStream(), 400, "ChatGPT not connected", "Error: $error")
-          throw AuthException("ChatGPT declined the sign-in: $error")
+          respond(client.getOutputStream(), 400, "ChatGPT bağlanamadı", "Hata: $error")
+          throw AuthException("ChatGPT giriş isteğini reddetti: $error")
         }
         val code = uri.getQueryParameter("code")
         val state = uri.getQueryParameter("state")
         val clientId = uri.getQueryParameter("client_id")?.trim()
         if (code.isNullOrEmpty() || state != expectedState) {
           // A stale tab or a stray request: answer it and keep waiting for the real one.
-          respond(client.getOutputStream(), 400, "Unexpected reply", "Start the sign-in from the app again.")
+          respond(client.getOutputStream(), 400, "Beklenmeyen yanıt", "Girişi uygulamadan yeniden başlatın.")
           return@use
         }
         if (clientId.isNullOrEmpty()) {
-          respond(client.getOutputStream(), 400, "ChatGPT not connected", "The reply has no client id.")
-          throw AuthException("The ChatGPT reply has no client id")
+          respond(client.getOutputStream(), 400, "ChatGPT bağlanamadı", "Yanıtta istemci kimliği yok.")
+          throw AuthException("ChatGPT yanıtında istemci kimliği bulunamadı")
         }
         respond(
             client.getOutputStream(),
             200,
-            "ChatGPT connected",
-            "You can go back to Tupo Vision.",
+            "ChatGPT bağlandı",
+            "Artık Tupo Vision TR uygulamasına dönebilirsiniz.",
         )
         return Callback(code, clientId)
       }
     }
-    throw AuthException("Sign-in was not completed within 5 minutes")
+    throw AuthException("Giriş işlemi 5 dakika içinde tamamlanmadı")
   }
 
   private fun respond(out: java.io.OutputStream, status: Int, title: String, text: String) {
     val html =
-        "<!doctype html><html><head><meta charset=\"utf-8\">" +
+        "<!doctype html><html lang=\"tr\"><head><meta charset=\"utf-8\">" +
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
-            "<title>Tupo Vision</title></head>" +
+            "<title>Tupo Vision TR</title></head>" +
             "<body style=\"font-family:sans-serif;text-align:center;padding:22vh 24px 0;" +
-            "background:#101114;color:#f2f2f2\"><h2>$title</h2><p>$text</p></body></html>"
+            "background:#101114;color:#f2f2f2\"><h1>$title</h1><p>$text</p></body></html>"
     val body = html.toByteArray(Charsets.UTF_8)
     val reason = if (status == 200) "OK" else "Error"
     val head =
@@ -305,12 +311,11 @@ object ChatGptAuth {
     val expiresIn = token.optLong("expires_in", 0)
     val scopes = token.optString("scope").split(" ").filter { it.isNotBlank() }
     if (access.isEmpty() || refresh.isEmpty() || expiresIn <= 0) {
-      throw AuthException("ChatGPT returned an incomplete sign-in reply")
+      throw AuthException("ChatGPT eksik oturum yanıtı döndürdü")
     }
     if (PLAN_SCOPE !in scopes) {
       throw AuthException(
-          "ChatGPT did not grant plan usage. It needs a Go, Plus or Pro plan and your approval " +
-              "on the sign-in screen.",
+          "ChatGPT abonelik kullanım izni vermedi. Go, Plus veya Pro planı ve giriş ekranında onayınız gerekir.",
       )
     }
     return Credentials(

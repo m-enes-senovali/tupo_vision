@@ -1,16 +1,18 @@
-name: Build APK
+name: Build and Test APK
 
 on:
   push:
+    branches: [main, feature/tr-accessible-v1]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
-# The job publishes the APK as a release and pushes the build result to the `ci` branch.
+# Builds and tests every push/PR; publishes release APKs only on pushes to `main`.
 permissions:
   contents: write
 
 concurrency:
-  group: build
+  group: build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -43,28 +45,33 @@ jobs:
             echo "kind=throwaway key" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build
+      - name: Test and Build
         id: build
         env:
           SIGNING_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
         run: |
           set -o pipefail
           chmod +x gradlew
-          ./gradlew --no-daemon --stacktrace assembleDebug 2>&1 | tee build.log
+          ./gradlew --no-daemon --stacktrace testDebugUnitTest assembleDebug assembleRelease assembleDebugAndroidTest 2>&1 | tee build.log
 
       - name: Remove signing key from the runner
         if: always()
         run: rm -f "$RUNNER_TEMP/signing.p12"
 
-      # The result goes to the `ci` branch too, so a build can be checked with plain git.
-      - name: Publish result to the ci branch
+      - name: Collect build artifacts
         if: always()
         run: |
           mkdir -p out
           tail -n 400 build.log > out/build-tail.log || true
           grep -nE "^e: |error:|FAILED|What went wrong|Could not" build.log | head -n 200 > out/errors.log || true
+          cp app/build/outputs/apk/debug/app-debug.apk out/tupo-vision-tr-debug.apk || true
+          cp app/build/outputs/apk/release/app-release.apk out/tupo-vision-tr-release.apk || true
           cp app/build/outputs/apk/debug/app-debug.apk out/tupo-vision.apk || true
           echo "${{ github.sha }} ${{ steps.build.outcome }} run=${{ github.run_number }} signing=${{ steps.signing.outputs.kind }}" > out/STATUS
+
+      - name: Publish result to the ci branch
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
           cd out
           git init -q -b ci
           git config user.name "github-actions[bot]"
@@ -73,27 +80,31 @@ jobs:
           git commit -q -m "Build ${{ github.run_number }}: ${{ steps.build.outcome }}"
           git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci
 
-      - name: Upload APK artifact
+      - name: Upload APK artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: tupo-vision-apk
-          path: out/tupo-vision.apk
+          name: tupo-vision-tr-apks
+          path: |
+            out/tupo-vision-tr-debug.apk
+            out/tupo-vision-tr-release.apk
 
       - name: Publish release
-        if: success()
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          SHA256=$(sha256sum out/tupo-vision.apk | cut -d' ' -f1)
+          SHA_DEBUG=$(sha256sum out/tupo-vision-tr-debug.apk | cut -d' ' -f1)
+          SHA_RELEASE=$(sha256sum out/tupo-vision-tr-release.apk | cut -d' ' -f1)
           {
             echo "Built from commit ${{ github.sha }}."
             echo
             echo "Signed with: ${{ steps.signing.outputs.kind }}"
-            echo "SHA-256 of tupo-vision.apk: $SHA256"
+            echo "SHA-256 (tupo-vision-tr-release.apk): $SHA_RELEASE"
+            echo "SHA-256 (tupo-vision-tr-debug.apk): $SHA_DEBUG"
           } > notes.md
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest out/tupo-vision.apk \
+          gh release create latest out/tupo-vision-tr-release.apk out/tupo-vision-tr-debug.apk \
             --target "${{ github.sha }}" \
-            --title "Tupo Vision build ${{ github.run_number }}" \
+            --title "Tupo Vision TR build ${{ github.run_number }}" \
             --notes-file notes.md

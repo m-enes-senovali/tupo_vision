@@ -20,6 +20,11 @@ object Frames {
   private const val JPEG_QUALITY = 82
   // Long side sent to the model. Bigger costs tokens and upload time without helping much.
   private const val MAX_SIDE = 1280
+  const val HD_JPEG_QUALITY = 90
+  const val HD_MAX_SIDE = 2048
+  const val FAST_JPEG_QUALITY = 72
+  const val FAST_HD_MAX_SIDE = 1280
+  const val FAST_HD_JPEG_QUALITY = 80
 
   private val lock = Any()
   private var data: ByteArray? = null
@@ -32,7 +37,7 @@ object Frames {
     private set
 
   @Volatile
-  var info: String = "no frames yet"
+  var info: String = "henüz görüntü yok"
     private set
 
   fun reset() {
@@ -42,7 +47,7 @@ object Frames {
       height = 0
     }
     count = 0
-    info = "no frames yet"
+    info = "henüz görüntü yok"
   }
 
   /** Copies the frame out of the SDK's buffer, which is only valid during the callback. */
@@ -65,7 +70,21 @@ object Frames {
       height = frame.height
     }
     count += 1
-    info = "${frame.width}x${frame.height}, $size bytes"
+    info = "${frame.width}x${frame.height}, $size bayt"
+  }
+
+  private class FrameSnapshot(val bytes: ByteArray, val width: Int, val height: Int)
+
+  private fun copyLatestFrame(): FrameSnapshot? {
+    var snapshot: FrameSnapshot? = null
+    synchronized(lock) {
+      val source = data
+      val evenSize = width > 0 && height > 0 && width % 2 == 0 && height % 2 == 0
+      if (source != null && evenSize && length == width * height * 3 / 2) {
+        snapshot = FrameSnapshot(source.copyOf(length), width, height)
+      }
+    }
+    return snapshot
   }
 
   /**
@@ -73,21 +92,36 @@ object Frames {
    * YUV 4:2:0 this code understands (then the caller falls back to a photo).
    */
   fun latestJpeg(quality: Int = JPEG_QUALITY): ByteArray? {
-    var copy: ByteArray? = null
-    var w = 0
-    var h = 0
-    synchronized(lock) {
-      val source = data
-      val evenSize = width > 0 && height > 0 && width % 2 == 0 && height % 2 == 0
-      if (source != null && evenSize && length == width * height * 3 / 2) {
-        w = width
-        h = height
-        copy = source.copyOf(length)
-      }
-    }
-    val bytes = copy ?: return null
-    return i420ToJpeg(bytes, w, h, quality)
+    val snapshot = copyLatestFrame() ?: return null
+    return i420ToJpeg(snapshot.bytes, snapshot.width, snapshot.height, quality)
   }
+
+  /**
+   * Returns the newest video frame encoded with the fast latency profile and capped to [maxSide].
+   */
+  fun latestScaledJpeg(
+      quality: Int = FAST_JPEG_QUALITY,
+      maxSide: Int = MAX_SIDE,
+  ): ByteArray? {
+    val snapshot = copyLatestFrame() ?: return null
+    val rawJpeg = i420ToJpeg(snapshot.bytes, snapshot.width, snapshot.height, quality) ?: return null
+    if (maxOf(snapshot.width, snapshot.height) <= maxSide) return rawJpeg
+    val decoded = BitmapFactory.decodeByteArray(rawJpeg, 0, rawJpeg.size) ?: return rawJpeg
+    return try {
+      bitmapToJpeg(decoded, maxSide = maxSide, quality = quality) ?: rawJpeg
+    } finally {
+      decoded.recycle()
+    }
+  }
+
+  fun fastLatestJpeg(): ByteArray? =
+      latestScaledJpeg(quality = FAST_JPEG_QUALITY, maxSide = MAX_SIDE)
+
+  fun fastBitmapToJpeg(bitmap: Bitmap): ByteArray? =
+      bitmapToJpeg(bitmap, maxSide = FAST_HD_MAX_SIDE, quality = FAST_HD_JPEG_QUALITY)
+
+  fun fastHeicToJpeg(buffer: ByteBuffer): ByteArray? =
+      heicToJpeg(buffer, maxSide = FAST_HD_MAX_SIDE, quality = FAST_HD_JPEG_QUALITY)
 
   private fun i420ToJpeg(i420: ByteArray, w: Int, h: Int, quality: Int): ByteArray? {
     val ySize = w * h
@@ -112,18 +146,30 @@ object Frames {
     }
   }
 
-  fun bitmapToJpeg(bitmap: Bitmap): ByteArray? =
+  fun bitmapToJpeg(
+      bitmap: Bitmap,
+      maxSide: Int = HD_MAX_SIDE,
+      quality: Int = HD_JPEG_QUALITY,
+  ): ByteArray? =
       try {
-        val scaled = scaleDown(bitmap)
-        val stream = ByteArrayOutputStream()
-        scaled.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, stream)
-        stream.toByteArray()
+        val scaled = scaleDown(bitmap, maxSide)
+        try {
+          val stream = ByteArrayOutputStream()
+          scaled.compress(Bitmap.CompressFormat.JPEG, quality, stream)
+          stream.toByteArray()
+        } finally {
+          if (scaled !== bitmap) scaled.recycle()
+        }
       } catch (e: Exception) {
         null
       }
 
   /** Photos arrive as HEIC with the orientation in EXIF, which the decoder does not apply. */
-  fun heicToJpeg(buffer: ByteBuffer): ByteArray? =
+  fun heicToJpeg(
+      buffer: ByteBuffer,
+      maxSide: Int = HD_MAX_SIDE,
+      quality: Int = HD_JPEG_QUALITY,
+  ): ByteArray? =
       try {
         val source = buffer.duplicate().apply { rewind() }
         val bytes = ByteArray(source.remaining())
@@ -132,10 +178,20 @@ object Frames {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         var sample = 1
-        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= MAX_SIDE) sample *= 2
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= maxSide) sample *= 2
         val options = BitmapFactory.Options().apply { inSampleSize = sample }
         val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
-        if (decoded == null) null else bitmapToJpeg(rotate(decoded, exifRotation(bytes)))
+        if (decoded == null) {
+          null
+        } else {
+          val rotated = rotate(decoded, exifRotation(bytes))
+          if (rotated !== decoded) decoded.recycle()
+          try {
+            bitmapToJpeg(rotated, maxSide, quality)
+          } finally {
+            rotated.recycle()
+          }
+        }
       } catch (e: Exception) {
         null
       } catch (e: OutOfMemoryError) {
@@ -155,10 +211,10 @@ object Frames {
         null
       }
 
-  private fun scaleDown(bitmap: Bitmap): Bitmap {
+  private fun scaleDown(bitmap: Bitmap, maxSide: Int = MAX_SIDE): Bitmap {
     val longSide = maxOf(bitmap.width, bitmap.height)
-    if (longSide <= MAX_SIDE) return bitmap
-    val factor = MAX_SIDE.toFloat() / longSide
+    if (longSide <= maxSide) return bitmap
+    val factor = maxSide.toFloat() / longSide
     return Bitmap.createScaledBitmap(
         bitmap,
         (bitmap.width * factor).toInt().coerceAtLeast(1),
