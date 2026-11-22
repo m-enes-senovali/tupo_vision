@@ -86,6 +86,8 @@ Key additions in this fork:
 
 Contributions, accessibility improvements, and PRs are welcome on `main` or feature branches.
 
+- **AI Coding Agents & Developer Guide:** See [AGENTS.md](AGENTS.md) (universal standard for Codex / Antigravity / Claude), [CLAUDE.md](CLAUDE.md), [GEMINI.md](GEMINI.md), and [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ---
 
 ## Lisans / License
